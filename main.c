@@ -1,5 +1,5 @@
 //
-// Included Files
+// Arquivos de Inclusão
 //
 #include "driverlib.h"
 #include "device.h"
@@ -7,117 +7,91 @@
 #include "math.h"
 
 //
-// Defines
+// Definições de Constantes
 //
-#define F_SWITCH            10000.0F   // Frequência de chaveamento do Buck (100 kHz)
-#define TS                  (1.0F / F_SWITCH) // Período de chaveamento
-#define SIMULATION_STEP_SIZE 0.000005F // Passo de tempo para a simulação (5 us)
-#define NUM_SIMULATION_STEPS_PER_PWM_CYCLE (uint32_t)(TS / SIMULATION_STEP_SIZE)
+#define F_PWM                10000.0f    // Frequência de chaveamento (Hz)
+#define T_PWM                (1.0f / F_PWM) // Período de chaveamento (s)
+#define DT_SIM               0.000005f   // Passo de simulação (5 µs)
+#define N_STEPS_PER_CYCLE    (uint32_t)(T_PWM / DT_SIM) // Passos por ciclo PWM
+
+// Parâmetros do Conversor Buck
+#define VIN                  12.0f       // Tensão de entrada (V)
+#define L                    0.001f      // Indutância (H)
+#define C                    0.00001f    // Capacitância (F)
+#define R_LOAD               10.0f       // Carga resistiva (Ohm)
 
 //
-// Buck Converter Parameters
+// Variáveis Globais da Simulação
 //
-#define VIN                 12.0F       // Tensão de entrada (V)
-#define L_BUCK              0.001F     // Indutância (H) - 100 uH
-#define C_BUCK              0.00001F   // Capacitância (F) - 1 uF
-#define R_LOAD              10.0F       // Resistência de carga (Ohm)
+volatile float32_t g_vout_sim = 0.0f;        // Tensão de saída simulada
+volatile float32_t g_il_sim = 0.0f;          // Corrente no indutor simulada
+volatile uint32_t g_step_counter = 0;        // Contador de passos dentro do ciclo PWM
+volatile bool g_switch_on = false;           // Estado da chave (true = ligada)
+volatile bool g_new_step_ready = false;      // Flag para novo passo de simulação
+volatile float g_duty_cycle = 0.5f;          // Razão cíclica (entre 0 e 1)
 
 //
-// Global Variables for Buck Converter State and Simulation Control
+// Função Principal
 //
-volatile float32_t Vout_sim = 0.0F;  // Tensão de saída simulada
-volatile float32_t IL_sim = 0.0F;    // Corrente do indutor simulada
-volatile uint32_t pwm_step_counter = 0; // Contador de passos de simulação dentro de um ciclo PWM
-volatile bool switch_on_state = false; // true se a chave estiver ligada, false se desligada
-volatile bool new_simulation_step_ready = false; // Flag para indicar que um novo passo de simulação está pronto
-volatile float duty_cycle=0.5f;
-
 void main(void)
 {
-    // Device Initialization
+    float32_t v_l, i_c;
+
+    // Inicializações do dispositivo
     Device_init();
-
-
-    //
-    // Initializes PIE and clears PIE registers. Disables CPU interrupts.
-    //
     Interrupt_initModule();
-    //
-    // Initializes the PIE vector table with pointers to the shell Interrupt
-    // Service Routines (ISR).
-    //
     Interrupt_initVectorTable();
-
     Board_init();
 
-    //
-    // Enable Global Interrupt (INTM) and realtime interrupt (DBGM)
-    //
+    // Habilita interrupções globais
     EINT;
     ERTM;
-    float32_t V_inductor;
-    float32_t I_capacitor;
 
-    while(1)
+    // Loop principal
+    while (1)
     {
-
-        // Only execute the simulation step if the ISR has flagged it
-        if (new_simulation_step_ready)
+        // Executa apenas se a ISR indicar que é hora de simular
+        if (g_new_step_ready)
         {
-            // Clear the flag immediately
-            new_simulation_step_ready = false;
+            g_new_step_ready = false;  // Limpa a flag imediatamente
 
-            // Solve the Buck converter equations for the current simulation step
+            // Cálculo da tensão no indutor
+            if (g_switch_on)
+                v_l = VIN - g_vout_sim;
+            else
+                v_l = -g_vout_sim;
 
+            // Corrente no capacitor (malha de saída)
+            i_c = g_il_sim - (g_vout_sim / R_LOAD);
 
-                // Solve difference equations based on the current state determined by the ISR
-                if (switch_on_state) // Chave ligada
-                {
-                    V_inductor = VIN - Vout_sim;
-                    I_capacitor = IL_sim - (Vout_sim / R_LOAD);
-                }
-                else // Chave desligada
-                {
-                    V_inductor = -Vout_sim;
-                    I_capacitor = IL_sim - (Vout_sim / R_LOAD);
-                }
-
-                // Update state variables using Euler's method
-                IL_sim += (SIMULATION_STEP_SIZE / L_BUCK) * V_inductor;
-                Vout_sim += (SIMULATION_STEP_SIZE / C_BUCK) * I_capacitor;
-
-            // At this point, Vout_sim and IL_sim hold the updated values
-            // These values can be used for debugging, plotting, or control algorithms
+            // Integração pelo método de Euler
+            g_il_sim += (DT_SIM / L) * v_l;
+            g_vout_sim += (DT_SIM / C) * i_c;
         }
     }
-
 }
 
-
+//
+// Interrupção do Timer (gera passo de simulação HIL)
+//
 __interrupt void INT_myCPUTIMER0_ISR(void)
 {
-    // Determine the switch state for the *upcoming* simulation step
-    if (pwm_step_counter < (uint32_t)(duty_cycle * NUM_SIMULATION_STEPS_PER_PWM_CYCLE))
-    {
-        switch_on_state = true; // Chave ligada
-    }
+    // Define o estado da chave com base no duty cycle
+    if (g_step_counter < (uint32_t)(g_duty_cycle * N_STEPS_PER_CYCLE))
+        g_switch_on = true;
     else
-    {
-        switch_on_state = false; // Chave desligada
-    }
+        g_switch_on = false;
 
-    // Increment simulation step counter
-    pwm_step_counter++;
+    // Incrementa contador de passos
+    g_step_counter++;
 
-    // Reset counter if a full PWM cycle has passed
-    if (pwm_step_counter >= NUM_SIMULATION_STEPS_PER_PWM_CYCLE)
-    {
-        pwm_step_counter = 0;
-    }
+    // Reinicia no fim do ciclo PWM
+    if (g_step_counter >= N_STEPS_PER_CYCLE)
+        g_step_counter = 0;
 
-    // Set flag to indicate that a new simulation step needs to be processed by the main loop
-    new_simulation_step_ready = true;
+    // Indica que novo passo está pronto para ser executado no loop principal
+    g_new_step_ready = true;
 
-    // Acknowledge this interrupt to receive more interrupts from this group
-    Interrupt_clearACKGroup(INT_myCPUTIMER0_INTERRUPT_ACK_GROUP);
+    // Libera nova interrupção
+    Interrupt_clearACKGroup(INT_myCPUTIMER0_INTERRUPT_ACGROUP);
 }
